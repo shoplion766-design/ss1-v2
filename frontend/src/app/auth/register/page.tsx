@@ -1,5 +1,5 @@
 'use client';
-import { useState, useEffect } from 'react';
+import { Suspense, useState } from 'react';
 import { useAuth } from '@/contexts/AuthContext';
 import { translations } from '@/lib/translations';
 import Link from 'next/link';
@@ -16,7 +16,7 @@ const PACKAGES = [
 const COUNTRIES = ['Côte d\'Ivoire','Sénégal','Mali','Burkina Faso','Guinée','Cameroun','Togo','Bénin',
   'Niger','Mauritanie','Congo','Gabon','France','Belgique','Maroc','Algérie','Tunisie','Autre'];
 
-export default function RegisterPage() {
+function RegisterContent() {
   const { register, lang } = useAuth();
   const t = (translations[lang as keyof typeof translations] || translations.fr).auth;
   const isRtl = lang === 'ar';
@@ -39,7 +39,6 @@ export default function RegisterPage() {
     if (step === 1) { setStep(2); return; }
     setLoading(true); setError('');
     try {
-      // Map packageId to UUID — in production, fetch from API
       await register({ ...form, language: lang });
     } catch (err: any) {
       setError(err?.response?.data?.error || 'Erreur lors de l\'inscription');
@@ -65,7 +64,6 @@ export default function RegisterPage() {
       </div>
 
       <div style={{ width: '100%', maxWidth: step === 2 ? 700 : 460 }}>
-        {/* Progress */}
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12, marginBottom: 32 }}>
           {[1, 2].map(s => (
             <div key={s} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -201,6 +199,20 @@ export default function RegisterPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+export default function RegisterPage() {
+  return (
+    <Suspense 
+      fallback={
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '100vh', background: '#0a0a0a' }}>
+          <div style={{ color: '#f5c842' }}>Chargement...</div>
+        </div>
+      }
+    >
+      <RegisterContent />
+    </Suspense>
   );
 }
 
