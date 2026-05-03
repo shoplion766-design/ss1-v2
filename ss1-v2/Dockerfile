@@ -1,3 +1,4 @@
+# cache-bust: v2
 FROM node:18-alpine
 WORKDIR /app
 COPY package*.json ./
