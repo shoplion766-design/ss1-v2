@@ -499,6 +499,254 @@ app.post('/api/admin/products', requireAdmin, async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Server error' }); }
 });
 
+// ════════════════════════════════════════════════════════
+// AFFILIATE — ROUTES COMPLÉMENTAIRES
+// ════════════════════════════════════════════════════════
+
+// Avatar
+app.patch('/api/affiliate/profile/avatar', requireAuth, async (req, res) => {
+  const { avatarUrl } = req.body;
+  if (!avatarUrl) return res.status(400).json({ error: 'avatarUrl requis' });
+  try {
+    await pool.query('UPDATE users SET avatar_url=$1 WHERE id=$2', [avatarUrl, req.user.userId]);
+    res.json({ message: 'Avatar mis à jour' });
+  } catch (err) { res.status(500).json({ error: 'Server error' }); }
+});
+
+// Commandes e-commerce — création
+app.post('/api/affiliate/orders', requireAuth, async (req, res) => {
+  const userId = req.user.userId;
+  const { items, paymentMethod = 'balance' } = req.body;
+  if (!Array.isArray(items) || items.length === 0)
+    return res.status(400).json({ error: 'items requis' });
+  try {
+    // Récupérer les produits pour calculer les totaux
+    const ids = items.map(i => i.productId);
+    const prods = await pool.query(
+      'SELECT id, price_usd, price_fcfa, pv_points FROM products WHERE id=ANY($1::uuid[]) AND is_active=true',
+      [ids]
+    );
+    const prodMap = {};
+    prods.rows.forEach(p => { prodMap[p.id] = p; });
+
+    let totalUsd = 0, totalPv = 0;
+    const enrichedItems = items.map(item => {
+      const p = prodMap[item.productId];
+      if (!p) throw new Error(`Produit inconnu: ${item.productId}`);
+      const qty = parseInt(item.quantity) || 1;
+      totalUsd += p.price_usd * qty;
+      totalPv  += parseFloat(p.pv_points) * qty;
+      return { productId: item.productId, quantity: qty, unitPrice: p.price_usd };
+    });
+
+    const r = await pool.query(
+      `INSERT INTO ecommerce_orders (user_id, items, total_usd, total_pv, payment_method)
+       VALUES ($1,$2,$3,$4,$5) RETURNING id, created_at`,
+      [userId, JSON.stringify(enrichedItems), totalUsd.toFixed(2), totalPv.toFixed(2), paymentMethod]
+    );
+    res.status(201).json({ order: r.rows[0], totalUsd, totalPv });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message || 'Server error' });
+  }
+});
+
+// Commandes e-commerce — liste
+app.get('/api/affiliate/orders', requireAuth, async (req, res) => {
+  try {
+    const r = await pool.query(
+      `SELECT id, items, total_usd, total_pv, payment_method, status, created_at
+       FROM ecommerce_orders WHERE user_id=$1 ORDER BY created_at DESC LIMIT 50`,
+      [req.user.userId]
+    );
+    res.json({ orders: r.rows });
+  } catch (err) { res.status(500).json({ error: 'Server error' }); }
+});
+
+// Tokens — taux de change
+app.get('/api/affiliate/tokens/rates', requireAuth, async (req, res) => {
+  try {
+    const r = await pool.query('SELECT * FROM currency_rates ORDER BY currency ASC');
+    res.json({ rates: r.rows });
+  } catch (err) { res.status(500).json({ error: 'Server error' }); }
+});
+
+// Tokens — générer un token interne
+app.post('/api/affiliate/tokens/generate', requireAuth, async (req, res) => {
+  const userId = req.user.userId;
+  const { amountUsd, currency = 'USD' } = req.body;
+  if (!amountUsd || isNaN(amountUsd) || parseFloat(amountUsd) <= 0)
+    return res.status(400).json({ error: 'amountUsd invalide' });
+  try {
+    const rateRes = await pool.query('SELECT rate_to_usd FROM currency_rates WHERE currency=$1', [currency]);
+    const rateToUsd = rateRes.rows.length > 0 ? parseFloat(rateRes.rows[0].rate_to_usd) : 1.0;
+    const tokenAmount = parseFloat((parseFloat(amountUsd) / rateToUsd).toFixed(4));
+    const code = require('crypto').randomBytes(16).toString('hex').toUpperCase();
+    const r = await pool.query(
+      `INSERT INTO tokens (user_id, code, amount, currency, rate_to_usd, expires_at)
+       VALUES ($1,$2,$3,$4,$5, NOW() + INTERVAL '90 days') RETURNING id, code, amount, currency, expires_at`,
+      [userId, code, tokenAmount, currency, rateToUsd]
+    );
+    res.status(201).json({ token: r.rows[0] });
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
+});
+
+// Tokens — mes tokens
+app.get('/api/affiliate/tokens/my', requireAuth, async (req, res) => {
+  try {
+    const r = await pool.query(
+      `SELECT id, code, amount, currency, rate_to_usd, status, used_at, expires_at, created_at
+       FROM tokens WHERE user_id=$1 ORDER BY created_at DESC`,
+      [req.user.userId]
+    );
+    res.json({ tokens: r.rows });
+  } catch (err) { res.status(500).json({ error: 'Server error' }); }
+});
+
+// Vouchers — générer (membre ou stockiste)
+app.post('/api/affiliate/vouchers/generate', requireAuth, async (req, res) => {
+  const userId = req.user.userId;
+  const { discountType = 'percent', discountValue, bonusPercent = 0, usesLimit = 1, expiresAt } = req.body;
+  if (!discountValue || isNaN(discountValue))
+    return res.status(400).json({ error: 'discountValue requis' });
+  try {
+    const userRes = await pool.query('SELECT role FROM users WHERE id=$1', [userId]);
+    const source = ['stockist','admin','superadmin'].includes(userRes.rows[0]?.role) ? 'stockist' : 'member';
+    const code = 'VC' + require('crypto').randomBytes(5).toString('hex').toUpperCase();
+    const r = await pool.query(
+      `INSERT INTO vouchers (sponsor_id, code, discount_type, discount_value, bonus_percent, uses_limit, source, expires_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+      [userId, code, discountType, discountValue, bonusPercent, usesLimit, source, expiresAt || null]
+    );
+    res.status(201).json({ voucher: r.rows[0] });
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
+});
+
+// Vouchers — appliquer à un utilisateur
+app.post('/api/affiliate/vouchers/apply', requireAuth, async (req, res) => {
+  const { userId, code } = req.body;
+  if (!userId || !code) return res.status(400).json({ error: 'userId et code requis' });
+  try {
+    const v = await pool.query(
+      `SELECT id, uses_count, uses_limit, bonus_percent FROM vouchers
+       WHERE code=$1 AND is_active=true AND (expires_at IS NULL OR expires_at>NOW()) AND uses_count<uses_limit`,
+      [code.trim().toUpperCase()]
+    );
+    if (v.rows.length === 0) return res.status(404).json({ error: 'Voucher invalide ou expiré' });
+    const voucher = v.rows[0];
+    // Vérifier si déjà utilisé par cet user
+    const already = await pool.query('SELECT 1 FROM user_vouchers WHERE user_id=$1', [userId]);
+    if (already.rows.length > 0) return res.status(409).json({ error: 'Utilisateur a déjà un voucher appliqué' });
+    await pool.query('INSERT INTO user_vouchers (user_id, voucher_id) VALUES ($1,$2)', [userId, voucher.id]);
+    await pool.query('UPDATE vouchers SET uses_count=uses_count+1 WHERE id=$1', [voucher.id]);
+    res.json({ message: 'Voucher appliqué', bonusPercent: voucher.bonus_percent });
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
+});
+
+// Vouchers — désactiver le sien
+app.patch('/api/affiliate/vouchers/:code/deactivate', requireAuth, async (req, res) => {
+  try {
+    const r = await pool.query(
+      'UPDATE vouchers SET is_active=false WHERE code=$1 AND sponsor_id=$2 RETURNING id',
+      [req.params.code.toUpperCase(), req.user.userId]
+    );
+    if (r.rows.length === 0) return res.status(404).json({ error: 'Voucher non trouvé ou non autorisé' });
+    res.json({ message: 'Voucher désactivé' });
+  } catch (err) { res.status(500).json({ error: 'Server error' }); }
+});
+
+// ════════════════════════════════════════════════════════
+// ADMIN — ROUTES COMPLÉMENTAIRES
+// ════════════════════════════════════════════════════════
+
+// Changer le rôle d'un utilisateur
+app.patch('/api/admin/users/:id/role', requireAdmin, async (req, res) => {
+  const { role } = req.body;
+  const allowed = ['member', 'stockist', 'admin'];
+  if (!allowed.includes(role)) return res.status(400).json({ error: `Rôle invalide. Valeurs: ${allowed.join(', ')}` });
+  try {
+    await pool.query('UPDATE users SET role=$1 WHERE id=$2', [role, req.params.id]);
+    res.json({ message: `Rôle mis à jour: ${role}` });
+  } catch (err) { res.status(500).json({ error: 'Server error' }); }
+});
+
+// Modifier un produit
+app.patch('/api/admin/products/:id', requireAdmin, async (req, res) => {
+  const { name, tagline, description, ingredients, priceUsd, priceFcfa, pvPoints, imageUrl, isActive, sortOrder } = req.body;
+  try {
+    await pool.query(
+      `UPDATE products SET
+        name        = COALESCE($1, name),
+        tagline     = COALESCE($2, tagline),
+        description = COALESCE($3, description),
+        ingredients = COALESCE($4, ingredients),
+        price_usd   = COALESCE($5, price_usd),
+        price_fcfa  = COALESCE($6, price_fcfa),
+        pv_points   = COALESCE($7, pv_points),
+        image_url   = COALESCE($8, image_url),
+        is_active   = COALESCE($9, is_active),
+        sort_order  = COALESCE($10, sort_order)
+       WHERE id=$11`,
+      [name, tagline, description, ingredients, priceUsd, priceFcfa, pvPoints, imageUrl, isActive, sortOrder, req.params.id]
+    );
+    res.json({ message: 'Produit mis à jour' });
+  } catch (err) { res.status(500).json({ error: 'Server error' }); }
+});
+
+// Calculer/snapshot top performers du mois
+app.post('/api/admin/top-performer/calculate', requireAdmin, async (req, res) => {
+  const period = req.body.period || new Date().toISOString().slice(0, 7); // YYYY-MM
+  try {
+    // Supprimer l'ancien snapshot pour cette période
+    await pool.query('DELETE FROM top_performers WHERE period=$1', [period]);
+    // Calculer et insérer les 10 meilleurs
+    const r = await pool.query(
+      `INSERT INTO top_performers (user_id, period, earnings_usd, new_referrals, total_pv, rank)
+       SELECT
+         u.id,
+         $1 as period,
+         COALESCE(SUM(e.amount_net) FILTER (WHERE e.status='confirmed' AND TO_CHAR(e.created_at,'YYYY-MM')=$1), 0) as earnings_usd,
+         (SELECT COUNT(*) FROM users WHERE sponsor_id=u.id AND TO_CHAR(created_at,'YYYY-MM')=$1) as new_referrals,
+         COALESCE(u.personal_pv, 0) as total_pv,
+         RANK() OVER (ORDER BY COALESCE(SUM(e.amount_net) FILTER (WHERE e.status='confirmed' AND TO_CHAR(e.created_at,'YYYY-MM')=$1), 0) DESC) as rank
+       FROM users u
+       LEFT JOIN earnings e ON e.user_id=u.id
+       WHERE u.role IN ('member','stockist') AND u.status='active'
+       GROUP BY u.id
+       ORDER BY earnings_usd DESC
+       LIMIT 10
+       RETURNING id`,
+      [period]
+    );
+    res.json({ message: `Top performers calculés pour ${period}`, count: r.rows.length });
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
+});
+
+// Créer des vouchers pour un stockiste
+app.post('/api/admin/vouchers/create-for-stockist', requireAdmin, async (req, res) => {
+  const { stockistId, quantity = 1, discountType = 'percent', discountValue, bonusPercent = 0, usesLimit = 1, expiresAt } = req.body;
+  if (!stockistId) return res.status(400).json({ error: 'stockistId requis' });
+  if (!discountValue || isNaN(discountValue)) return res.status(400).json({ error: 'discountValue requis' });
+  const qty = Math.min(parseInt(quantity) || 1, 100); // max 100 à la fois
+  try {
+    // Vérifier que l'utilisateur est bien stockiste
+    const u = await pool.query("SELECT id FROM users WHERE id=$1 AND role='stockist'", [stockistId]);
+    if (u.rows.length === 0) return res.status(404).json({ error: 'Stockiste introuvable' });
+    const crypto = require('crypto');
+    const created = [];
+    for (let i = 0; i < qty; i++) {
+      const code = 'ST' + crypto.randomBytes(5).toString('hex').toUpperCase();
+      const r = await pool.query(
+        `INSERT INTO vouchers (sponsor_id, code, discount_type, discount_value, bonus_percent, uses_limit, source, expires_at)
+         VALUES ($1,$2,$3,$4,$5,$6,'stockist',$7) RETURNING code`,
+        [stockistId, code, discountType, discountValue, bonusPercent, usesLimit, expiresAt || null]
+      );
+      created.push(r.rows[0].code);
+    }
+    res.status(201).json({ message: `${created.length} voucher(s) créé(s)`, codes: created });
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
+});
+
 // ─── Health ────────────────────────────────────────────
 app.get('/health', (req, res) => res.json({ status: 'ok', service: 'ss1-unified', version: '2.0.0' }));
 app.use((req, res) => res.status(404).json({ error: 'Route not found' }));

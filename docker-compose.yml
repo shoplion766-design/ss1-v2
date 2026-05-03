@@ -29,86 +29,34 @@ services:
       timeout: 5s
       retries: 5
 
-  auth-service:
-    build: ./services/auth
+  # ── Backend unifié (remplace les microservices en local) ──
+  backend:
+    build: ./ss1-v2
     ports:
-      - "3001:3001"
+      - "8080:8080"
     environment:
       DATABASE_URL: postgresql://ss1_user:ss1_secret_2024@postgres:5432/ss1_db
       JWT_SECRET: ss1_jwt_super_secret_2024_xK9mP2
       JWT_REFRESH_SECRET: ss1_refresh_secret_2024_xZ7nQ8
-      REDIS_URL: redis://redis:6379
-      PORT: 3001
+      PORT: 8080
     depends_on:
       postgres:
         condition: service_healthy
-      redis:
-        condition: service_healthy
-    restart: unless-stopped
-
-  affiliate-service:
-    build: ./services/affiliate
-    ports:
-      - "3002:3002"
-    environment:
-      DATABASE_URL: postgresql://ss1_user:ss1_secret_2024@postgres:5432/ss1_db
-      JWT_SECRET: ss1_jwt_super_secret_2024_xK9mP2
-      REDIS_URL: redis://redis:6379
-      PORT: 3002
-    depends_on:
-      postgres:
-        condition: service_healthy
-    restart: unless-stopped
-
-  admin-service:
-    build: ./services/admin
-    ports:
-      - "3003:3003"
-    environment:
-      DATABASE_URL: postgresql://ss1_user:ss1_secret_2024@postgres:5432/ss1_db
-      JWT_SECRET: ss1_jwt_super_secret_2024_xK9mP2
-      REDIS_URL: redis://redis:6379
-      PORT: 3003
-    depends_on:
-      postgres:
-        condition: service_healthy
-    restart: unless-stopped
-
-  gateway:
-    build: ./gateway
-    ports:
-      - "4000:4000"
-    environment:
-      AUTH_SERVICE_URL: http://auth-service:3001
-      AFFILIATE_SERVICE_URL: http://affiliate-service:3002
-      ADMIN_SERVICE_URL: http://admin-service:3003
-      JWT_SECRET: ss1_jwt_super_secret_2024_xK9mP2
-      PORT: 4000
-    depends_on:
-      - auth-service
-      - affiliate-service
-      - admin-service
     restart: unless-stopped
 
   frontend:
     build:
       context: ./frontend
+      # NEXT_PUBLIC_* sont baked au build — pointer vers le service Docker
       args:
-        NEXT_PUBLIC_API_URL: http://localhost:4000
+        NEXT_PUBLIC_API_URL: http://backend:8080
+        NEXT_PUBLIC_SITE_NAME: SS1
     ports:
       - "3000:3000"
     environment:
-      NEXT_PUBLIC_API_URL: http://localhost:4000
-      NEXT_PUBLIC_SITE_URL: http://localhost:3000
-      WATCHPACK_POLLING: "true"
+      NODE_ENV: production
     depends_on:
-      - gateway
-    stdin_open: true
-    tty: true
-    volumes:
-      - ./frontend:/app
-      - /app/node_modules
-      - /app/.next
+      - backend
     restart: unless-stopped
 
 volumes:
