@@ -23,7 +23,7 @@ const auth = async (req, res, next) => {
   if (!token) return res.status(401).json({ error: 'Unauthorized' });
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
-    const user = await pool.query('SELECT id, email, fullname, role FROM users WHERE id = $1', [decoded.userId]);
+    const user = await pool.query('SELECT id, email, first_name, role FROM users WHERE id = $1', [decoded.userId]);
     if (!user.rows.length) return res.status(401).json({ error: 'User not found' });
     req.user = user.rows[0];
     next();
@@ -33,7 +33,7 @@ const auth = async (req, res, next) => {
 };
 
 app.post('/api/auth/register', async (req, res) => {
-  const { email, password, fullname, referralCode } = req.body;
+  const { email, password, first_name, referralCode } = req.body;
   if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
   try {
     const existing = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
@@ -41,12 +41,12 @@ app.post('/api/auth/register', async (req, res) => {
     const hashed = await bcrypt.hash(password, 10);
     const refCode = uuidv4().slice(0, 8);
     const result = await pool.query(
-      `INSERT INTO users (email, password_hash, fullname, referral_code, sponsor_code, role)
+      `INSERT INTO users (email, password_hash, first_name, referral_code, sponsor_code, role)
        VALUES ($1, $2, $3, $4, $5, 'affiliate') RETURNING id`,
-      [email, hashed, fullname || email.split('@')[0], refCode, referralCode || null]
+      [email, hashed, first_name || email.split('@')[0], refCode, referralCode || null]
     );
     const token = generateToken(result.rows[0].id);
-    res.json({ token, user: { id: result.rows[0].id, email, fullname, referralCode: refCode } });
+    res.json({ token, user: { id: result.rows[0].id, email, first_name, referralCode: refCode } });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Server error' });
@@ -56,12 +56,12 @@ app.post('/api/auth/register', async (req, res) => {
 app.post('/api/auth/login', async (req, res) => {
   const { email, password } = req.body;
   try {
-    const user = await pool.query('SELECT id, email, fullname, password_hash, referral_code, role FROM users WHERE email = $1', [email]);
+    const user = await pool.query('SELECT id, email, first_name, password_hash, referral_code, role FROM users WHERE email = $1', [email]);
     if (!user.rows.length) return res.status(401).json({ error: 'Invalid credentials' });
     const valid = await bcrypt.compare(password, user.rows[0].password_hash);
     if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
     const token = generateToken(user.rows[0].id);
-    res.json({ token, user: { id: user.rows[0].id, email, fullname: user.rows[0].fullname, referralCode: user.rows[0].referral_code, role: user.rows[0].role } });
+    res.json({ token, user: { id: user.rows[0].id, email, first_name: user.rows[0].first_name, referralCode: user.rows[0].referral_code, role: user.rows[0].role } });
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
   }
@@ -81,7 +81,7 @@ app.get('/api/affiliate/stats', auth, async (req, res) => {
 
 app.get('/api/affiliate/referrals', auth, async (req, res) => {
   const referrals = await pool.query(
-    'SELECT id, email, fullname, created_at FROM users WHERE sponsor_code = (SELECT referral_code FROM users WHERE id = $1)',
+    'SELECT id, email, first_name, created_at FROM users WHERE sponsor_code = (SELECT referral_code FROM users WHERE id = $1)',
     [req.user.id]
   );
   res.json(referrals.rows);
